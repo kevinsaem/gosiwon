@@ -383,7 +383,7 @@ function renderTimeline() {
       }
 
       return `
-        <div class="absolute rounded-md flex flex-col items-center justify-center ${colorClass} ${locked?'':'cursor-grab active:cursor-grabbing'} reservation-block overflow-hidden"
+        <div class="absolute rounded-md flex flex-col items-center justify-start pt-0.5 ${colorClass} ${locked?'':'cursor-grab active:cursor-grabbing'} reservation-block overflow-hidden"
              data-res="${res.id}"
              style="left:${left+1}px; top:${top+1}px; width:${roomColWidth-2}px; height:${height-2}px; ${bgStyle} ${locked?'':'touch-action:none;'}">
           ${locked && height >= 40 ? '<div class="text-[8px] absolute top-0.5 right-0.5 opacity-60">🔒</div>' : ''}
