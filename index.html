@@ -372,12 +372,12 @@ function renderTimeline() {
       const name = tenant ? tenant.name : '?';
       let content;
       if (height < 30) {
-        content = `<div class="text-[10px] font-bold leading-none">${name[0]}</div>`;
+        content = `<div class="res-name text-[10px] font-bold leading-none">${name[0]}</div>`;
       } else if (height < 80) {
-        content = `<div class="text-[10px] font-bold leading-tight text-center px-0.5 truncate w-full">${name}</div>`;
+        content = `<div class="res-name text-[10px] font-bold leading-tight text-center px-0.5 truncate w-full">${name}</div>`;
       } else {
         content = `
-          <div class="text-[10px] font-bold leading-tight text-center px-0.5 truncate w-full">${name}</div>
+          <div class="res-name text-[10px] font-bold leading-tight text-center px-0.5 truncate w-full">${name}</div>
           <div class="text-[8px] mono opacity-70 mt-0.5">${diffDays(co,ci)}일</div>
         `;
       }
@@ -429,8 +429,8 @@ function renderTimeline() {
           <span>최적 배치 제안 보기</span>
         </button>
         <div class="text-[10px] text-[var(--muted)] text-center mt-2 leading-relaxed">
-          🔒 회색 블록은 잠금 · 컬러 블록은 길게 눌러 드래그<br/>
-          블록을 탭하면 상세 정보가 열려요
+          🔒 회색 = 입실중(잠금) · 이름 탭 = 정보 수정<br/>
+          블록 탭 = 방·날짜 이동 · 길게 누르면 드래그
         </div>
       </div>
     </div>
@@ -615,12 +615,24 @@ function attachDragHandlers() {
   blocks.forEach(block => {
     const resId = block.dataset.res;
     const res = state.reservations.find(r => r.id === resId);
-    if (!res || isLocked(res)) return;
+    if (!res) return;
 
-    // Long-press detection
+    // Locked blocks: tap opens edit form only
+    if (isLocked(res)) {
+      let lockTapTarget = null;
+      block.addEventListener('touchstart', (e) => { lockTapTarget = e.target; }, { passive: true });
+      block.addEventListener('touchend', (e) => {
+        openEditReservation(resId);
+      });
+      block.addEventListener('click', () => { openEditReservation(resId); });
+      return;
+    }
+
+    // Long-press detection for drag
     let pressTimer = null;
     let startX = 0, startY = 0;
     let dragging = false;
+    let touchTarget = null;
 
     const startDrag = (clientX, clientY) => {
       dragging = true;
@@ -685,16 +697,25 @@ function attachDragHandlers() {
       dragState = null;
     };
 
+    // Determine tap target: name → edit, block → move
+    const handleTap = (target) => {
+      if (target && target.closest('.res-name')) {
+        openEditReservation(resId);
+      } else {
+        openMoveReservation(resId);
+      }
+    };
+
     // Touch events
     block.addEventListener('touchstart', (e) => {
       const touch = e.touches[0];
       startX = touch.clientX;
       startY = touch.clientY;
+      touchTarget = e.target;
       pressTimer = setTimeout(() => {
-        // haptic feedback (if supported)
         if (navigator.vibrate) navigator.vibrate(20);
         startDrag(startX, startY);
-      }, 250);
+      }, 300);
     }, { passive: true });
 
     block.addEventListener('touchmove', (e) => {
@@ -719,19 +740,34 @@ function attachDragHandlers() {
         const touch = e.changedTouches[0];
         endDrag(touch.clientX, touch.clientY);
       } else {
-        // Treat as tap
-        viewReservation(resId);
+        handleTap(touchTarget);
       }
+      touchTarget = null;
     });
 
-    // Mouse events (desktop preview)
+    // Mouse events (desktop)
     block.addEventListener('mousedown', (e) => {
       startX = e.clientX;
       startY = e.clientY;
-      startDrag(e.clientX, e.clientY);
-      const onMove = (ev) => moveDrag(ev.clientX, ev.clientY);
+      const mouseTarget = e.target;
+      let mouseMoved = false;
+      const onMove = (ev) => {
+        const dx = Math.abs(ev.clientX - startX);
+        const dy = Math.abs(ev.clientY - startY);
+        if (dx > 5 || dy > 5) {
+          if (!mouseMoved) {
+            mouseMoved = true;
+            startDrag(startX, startY);
+          }
+          moveDrag(ev.clientX, ev.clientY);
+        }
+      };
       const onUp = (ev) => {
-        endDrag(ev.clientX, ev.clientY);
+        if (mouseMoved) {
+          endDrag(ev.clientX, ev.clientY);
+        } else {
+          handleTap(mouseTarget);
+        }
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
       };
@@ -1100,6 +1136,227 @@ function viewReservation(resId) {
     </div>
   `;
   document.body.appendChild(backdrop);
+}
+
+// ---------- EDIT RESERVATION (이름 탭) ----------
+function openEditReservation(resId) {
+  const res = state.reservations.find(r => r.id === resId);
+  if (!res) return;
+  const tenant = getTenant(res.tenantId);
+  const room = getRoom(res.roomId);
+  const locked = isLocked(res);
+  const days = diffDays(parseDate(res.checkOut), parseDate(res.checkIn));
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'fixed inset-0 bg-black/40 z-40 flex items-end';
+  backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
+
+  const escAttr = (s) => (s || '').replace(/"/g, '&quot;');
+
+  backdrop.innerHTML = `
+    <div class="slide-up bg-[var(--paper)] w-full max-w-[430px] mx-auto rounded-t-3xl p-5 max-h-[85vh] overflow-y-auto">
+      <div class="w-10 h-1 bg-[var(--line)] rounded-full mx-auto mb-4"></div>
+      <div class="flex items-center gap-3 mb-4">
+        <div class="w-12 h-12 rounded-full ${tenantColorClass(res.tenantId)} flex items-center justify-center text-lg font-bold">
+          ${tenant ? tenant.name[0] : '?'}
+        </div>
+        <div>
+          <div class="text-lg font-extrabold">입실자 정보 수정</div>
+          <div class="text-xs text-[var(--muted)]">${room ? room.number + '호' : '?'} · ${days}일 거주</div>
+        </div>
+        ${locked ? '<span class="text-[10px] mono bg-gray-200 text-gray-600 px-2 py-1 rounded-full ml-auto">🔒 입실중</span>' : ''}
+      </div>
+
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs text-[var(--muted)] block mb-1">이름</label>
+          <input id="edit-name" type="text" value="${escAttr(tenant ? tenant.name : '')}" class="w-full bg-white border border-[var(--line)] rounded-xl px-3 py-2.5 text-sm">
+        </div>
+        <div>
+          <label class="text-xs text-[var(--muted)] block mb-1">연락처</label>
+          <input id="edit-phone" type="tel" value="${escAttr(tenant ? tenant.phone : '')}" class="w-full bg-white border border-[var(--line)] rounded-xl px-3 py-2.5 text-sm">
+        </div>
+        <div>
+          <label class="text-xs text-[var(--muted)] block mb-1">메모</label>
+          <textarea id="edit-notes" rows="2" class="w-full bg-white border border-[var(--line)] rounded-xl px-3 py-2.5 text-sm resize-none">${escAttr(tenant ? tenant.notes : '')}</textarea>
+        </div>
+        <div class="bg-white rounded-xl border border-[var(--line)] p-3">
+          <div class="text-[10px] text-[var(--muted)] mb-1">배정 정보</div>
+          <div class="text-sm font-semibold">${room ? room.number + '호 · ' + room.floor + 'F' : '?'}</div>
+          <div class="text-xs mono text-[var(--muted)] mt-1">${res.checkIn} → ${res.checkOut}</div>
+        </div>
+      </div>
+
+      <button onclick="saveEditReservation('${resId}')" class="w-full bg-[var(--ink)] text-white rounded-2xl py-3 font-bold text-sm mt-4">
+        저장
+      </button>
+      ${locked ? `
+        <button onclick="earlyCheckout('${resId}')" class="w-full bg-[var(--coral)] text-white rounded-2xl py-3 font-bold text-sm mt-2">
+          조기 퇴실 처리
+        </button>
+      ` : `
+        <button onclick="deleteReservation('${resId}')" class="w-full bg-white border border-[var(--coral)] text-[var(--coral)] rounded-2xl py-3 font-bold text-sm mt-2">
+          예약 취소
+        </button>
+      `}
+      <button onclick="this.closest('.fixed').remove()" class="w-full bg-white border border-[var(--line)] rounded-2xl py-3 text-sm mt-2">
+        닫기
+      </button>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+}
+
+function saveEditReservation(resId) {
+  const res = state.reservations.find(r => r.id === resId);
+  if (!res) return;
+  const tenant = getTenant(res.tenantId);
+  if (!tenant) return;
+
+  const name = document.getElementById('edit-name').value.trim();
+  const phone = document.getElementById('edit-phone').value.trim();
+  const notes = document.getElementById('edit-notes').value.trim();
+
+  if (!name) { alert('이름을 입력해주세요'); return; }
+
+  tenant.name = name;
+  tenant.phone = phone;
+  tenant.notes = notes;
+
+  saveState();
+  document.querySelector('.fixed.z-40')?.remove();
+  render();
+  toast('✓ 정보를 수정했어요');
+}
+
+// ---------- MOVE RESERVATION (블록 탭) ----------
+function openMoveReservation(resId) {
+  const res = state.reservations.find(r => r.id === resId);
+  if (!res) return;
+  const tenant = getTenant(res.tenantId);
+  const locked = isLocked(res);
+
+  if (locked) {
+    openEditReservation(resId);
+    return;
+  }
+
+  const roomOptions = state.rooms.map(r =>
+    `<option value="${r.id}" ${r.id === res.roomId ? 'selected' : ''}>${r.number}호 (${r.floor}F)</option>`
+  ).join('');
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'fixed inset-0 bg-black/40 z-40 flex items-end';
+  backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
+  backdrop.innerHTML = `
+    <div class="slide-up bg-[var(--paper)] w-full max-w-[430px] mx-auto rounded-t-3xl p-5">
+      <div class="w-10 h-1 bg-[var(--line)] rounded-full mx-auto mb-4"></div>
+      <div class="flex items-center gap-3 mb-4">
+        <div class="w-10 h-10 rounded-full ${tenantColorClass(res.tenantId)} flex items-center justify-center text-sm font-bold">
+          ${tenant ? tenant.name[0] : '?'}
+        </div>
+        <div>
+          <div class="text-lg font-extrabold">${tenant ? tenant.name : '?'}</div>
+          <div class="text-xs text-[var(--muted)]">방 · 날짜 이동</div>
+        </div>
+      </div>
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs text-[var(--muted)] block mb-1">방</label>
+          <select id="move-room" class="w-full bg-white border border-[var(--line)] rounded-xl px-3 py-2.5 text-sm appearance-none">
+            ${roomOptions}
+          </select>
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="text-xs text-[var(--muted)] block mb-1">입실일</label>
+            <input id="move-ci" type="date" value="${res.checkIn}" class="w-full bg-white border border-[var(--line)] rounded-xl px-3 py-2.5 text-sm">
+          </div>
+          <div>
+            <label class="text-xs text-[var(--muted)] block mb-1">퇴실일</label>
+            <input id="move-co" type="date" value="${res.checkOut}" class="w-full bg-white border border-[var(--line)] rounded-xl px-3 py-2.5 text-sm">
+          </div>
+        </div>
+        <div id="move-conflict-msg" class="hidden text-xs text-[var(--coral)] bg-red-50 rounded-xl px-3 py-2"></div>
+      </div>
+      <button onclick="submitMoveReservation('${resId}')" class="w-full bg-[var(--accent)] text-white rounded-2xl py-3 font-bold text-sm mt-4">
+        이동하기
+      </button>
+      <button onclick="this.closest('.fixed').remove()" class="w-full bg-white border border-[var(--line)] rounded-2xl py-3 text-sm mt-2">
+        취소
+      </button>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+
+  // 실시간 충돌 검사
+  const checkConflict = () => {
+    const newRoomId = document.getElementById('move-room').value;
+    const newCi = document.getElementById('move-ci').value;
+    const newCo = document.getElementById('move-co').value;
+    const msg = document.getElementById('move-conflict-msg');
+    if (!newCi || !newCo) { msg.classList.add('hidden'); return; }
+    const ciDate = parseDate(newCi), coDate = parseDate(newCo);
+    if (ciDate >= coDate) { msg.textContent = '퇴실일은 입실일 이후여야 해요'; msg.classList.remove('hidden'); return; }
+    for (const other of state.reservations) {
+      if (other.id === resId || other.status === 'cancelled') continue;
+      if (other.roomId !== newRoomId) continue;
+      if (overlap(ciDate, coDate, parseDate(other.checkIn), parseDate(other.checkOut))) {
+        const ct = getTenant(other.tenantId);
+        msg.textContent = `${ct ? ct.name : '?'}의 예약(${other.checkIn.slice(5)} ~ ${other.checkOut.slice(5)})과 겹쳐요`;
+        msg.classList.remove('hidden');
+        return;
+      }
+    }
+    msg.classList.add('hidden');
+  };
+  document.getElementById('move-room').addEventListener('change', checkConflict);
+  document.getElementById('move-ci').addEventListener('change', checkConflict);
+  document.getElementById('move-co').addEventListener('change', checkConflict);
+}
+
+function submitMoveReservation(resId) {
+  const res = state.reservations.find(r => r.id === resId);
+  if (!res) return;
+
+  const newRoomId = document.getElementById('move-room').value;
+  const newCi = document.getElementById('move-ci').value;
+  const newCo = document.getElementById('move-co').value;
+
+  if (!newCi || !newCo) { alert('날짜를 입력해주세요'); return; }
+  const ciDate = parseDate(newCi), coDate = parseDate(newCo);
+  if (ciDate >= coDate) { alert('퇴실일은 입실일 이후여야 해요'); return; }
+
+  // 충돌 검사
+  for (const other of state.reservations) {
+    if (other.id === resId || other.status === 'cancelled') continue;
+    if (other.roomId !== newRoomId) continue;
+    if (overlap(ciDate, coDate, parseDate(other.checkIn), parseDate(other.checkOut))) {
+      const ct = getTenant(other.tenantId);
+      alert(`${ct ? ct.name : '?'}의 예약과 겹쳐서 이동할 수 없어요`);
+      return;
+    }
+  }
+
+  const oldRoom = res.roomId;
+  const oldCi = res.checkIn;
+  res.roomId = newRoomId;
+  res.checkIn = newCi;
+  res.checkOut = newCo;
+
+  state.history.push({
+    id: `h${Date.now()}`,
+    resId, action: 'manual_move',
+    oldRoom, oldCheckIn: oldCi,
+    newRoom: newRoomId, newDate: newCi,
+    at: new Date().toISOString()
+  });
+
+  saveState();
+  document.querySelector('.fixed.z-40')?.remove();
+  render();
+  const newRoom = getRoom(newRoomId);
+  toast(`✓ ${newRoom ? newRoom.number + '호' : ''}로 이동했어요`);
 }
 
 function earlyCheckout(resId) {
