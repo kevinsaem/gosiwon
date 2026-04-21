@@ -1,0 +1,1273 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>고시원 방 배정 - GosiwonFlow</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Pretendard:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap');
+
+  :root {
+    --ink: #0F1419;
+    --paper: #FAFAF7;
+    --accent: #0D6B5C;
+    --accent-soft: #D4ECE6;
+    --coral: #E87461;
+    --amber: #F4B942;
+    --violet: #7C5FC5;
+    --sky: #4A90C2;
+    --muted: #8B8B82;
+    --line: #E8E6DE;
+    --locked: #C4C4BD;
+  }
+
+  * { font-family: 'Pretendard', sans-serif; -webkit-tap-highlight-color: transparent; }
+  body { background: var(--paper); color: var(--ink); overscroll-behavior: none; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+
+  /* tenant color palette */
+  .tenant-0 { background: #0D6B5C; color: white; }
+  .tenant-1 { background: #E87461; color: white; }
+  .tenant-2 { background: #7C5FC5; color: white; }
+  .tenant-3 { background: #4A90C2; color: white; }
+  .tenant-4 { background: #F4B942; color: #0F1419; }
+  .tenant-5 { background: #D4644A; color: white; }
+  .tenant-6 { background: #5A8F3E; color: white; }
+  .tenant-7 { background: #B8506B; color: white; }
+  .tenant-8 { background: #2B6CB0; color: white; }
+  .tenant-9 { background: #9B6B2A; color: white; }
+
+  .cell-locked {
+    background: repeating-linear-gradient(
+      45deg,
+      rgba(0,0,0,0.03),
+      rgba(0,0,0,0.03) 4px,
+      transparent 4px,
+      transparent 8px
+    );
+  }
+
+  .drag-ghost { opacity: 0.4; }
+  .drop-valid { box-shadow: inset 0 0 0 2px #0D6B5C; background: rgba(13, 107, 92, 0.1); }
+  .drop-invalid { box-shadow: inset 0 0 0 2px #E87461; background: rgba(232, 116, 97, 0.15); }
+
+  /* hide scrollbar on mobile */
+  .scroll-x::-webkit-scrollbar { height: 0; display: none; }
+  .scroll-x { -ms-overflow-style: none; scrollbar-width: none; }
+
+  .fade-in { animation: fadeIn 0.3s ease-out; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+  .slide-up { animation: slideUp 0.3s cubic-bezier(0.34, 1.56, 0.64, 1); }
+  @keyframes slideUp { from { transform: translateY(100%); } to { transform: none; } }
+
+  .pulse-today {
+    animation: pulseToday 2s ease-in-out infinite;
+  }
+  @keyframes pulseToday {
+    0%, 100% { background: rgba(13, 107, 92, 0.08); }
+    50% { background: rgba(13, 107, 92, 0.18); }
+  }
+
+  .tab-active {
+    color: var(--ink);
+    font-weight: 700;
+  }
+  .tab-active::after {
+    content: '';
+    position: absolute;
+    bottom: -2px;
+    left: 20%;
+    right: 20%;
+    height: 2px;
+    background: var(--accent);
+    border-radius: 2px;
+  }
+
+  /* Checkerboard for drop targets */
+  .drop-zone-active {
+    background-image:
+      linear-gradient(45deg, rgba(13,107,92,0.08) 25%, transparent 25%),
+      linear-gradient(-45deg, rgba(13,107,92,0.08) 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, rgba(13,107,92,0.08) 75%),
+      linear-gradient(-45deg, transparent 75%, rgba(13,107,92,0.08) 75%);
+    background-size: 8px 8px;
+    background-position: 0 0, 0 4px, 4px -4px, -4px 0;
+  }
+</style>
+</head>
+<body>
+
+<div id="app" class="min-h-screen max-w-[430px] mx-auto relative pb-20"></div>
+
+<script>
+/* ============================================================
+   고시원 방 배정 프로토타입 - 단일 파일 React 없는 Vanilla JS
+   - localStorage 영속화
+   - 드래그앤드롭 (터치 + 마우스)
+   - 공실 최소화 우선 최적화 알고리즘
+   ============================================================ */
+
+// ---------- DATE UTILS ----------
+const DAY = 86400000;
+function today() { const d = new Date(); d.setHours(0,0,0,0); return d; }
+function addDays(d, n) { const r = new Date(d); r.setDate(r.getDate() + n); return r; }
+function fmtDate(d) {
+  const y = d.getFullYear(); const m = String(d.getMonth()+1).padStart(2,'0'); const day = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+function parseDate(s) { const [y,m,d] = s.split('-').map(Number); return new Date(y, m-1, d); }
+function diffDays(a, b) { return Math.round((a.getTime() - b.getTime()) / DAY); }
+function fmtShort(d) { return `${d.getMonth()+1}/${d.getDate()}`; }
+function fmtDay(d) { return ['일','월','화','수','목','금','토'][d.getDay()]; }
+function overlap(a1, a2, b1, b2) { return a1 < b2 && b1 < a2; }
+
+// ---------- STATE (persisted to localStorage) ----------
+const STORAGE_KEY = 'gosiwon-flow-v1';
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch(e) {}
+  return seedData();
+}
+
+function saveState() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch(e) { console.warn('저장 실패', e); }
+}
+
+function seedData() {
+  const t0 = today();
+  const rooms = [];
+  for (let i = 1; i <= 10; i++) {
+    rooms.push({
+      id: `r${i}`,
+      number: `${100 + i}`,
+      floor: i <= 5 ? 1 : 2,
+      rent: i <= 5 ? 380000 : 420000,
+      tags: i % 3 === 0 ? ['창가'] : (i % 3 === 1 ? ['복도'] : ['창가','조용']),
+      active: true
+    });
+  }
+
+  const names = ['김민준','이서연','박지호','최유나','정도윤','한소율','강시우','윤하은','임건우','오채원','서주원','신예은'];
+  const tenants = names.map((n, i) => ({
+    id: `t${i+1}`,
+    name: n,
+    phone: `010-${String(1000+i*7).padStart(4,'0')}-${String(5000+i*13).padStart(4,'0')}`,
+    notes: ''
+  }));
+
+  // 현실적인 예약 데이터 (1~3개월 장기 거주 중심)
+  const reservations = [
+    // 기존 입실자 (오늘 이전 입실) - 잠금 대상, 다양한 퇴실 시점
+    { id:'res1', tenantId:'t1', roomId:'r1', checkIn: fmtDate(addDays(t0, -45)), checkOut: fmtDate(addDays(t0, 15)), status:'checked_in', createdAt: fmtDate(addDays(t0,-50)) },
+    { id:'res2', tenantId:'t2', roomId:'r3', checkIn: fmtDate(addDays(t0, -30)), checkOut: fmtDate(addDays(t0, 30)), status:'checked_in', createdAt: fmtDate(addDays(t0,-35)) },
+    { id:'res3', tenantId:'t3', roomId:'r5', checkIn: fmtDate(addDays(t0, -20)), checkOut: fmtDate(addDays(t0, 40)), status:'checked_in', createdAt: fmtDate(addDays(t0,-25)) },
+    { id:'res4', tenantId:'t4', roomId:'r7', checkIn: fmtDate(addDays(t0, -60)), checkOut: fmtDate(addDays(t0, 5)), status:'checked_in', createdAt: fmtDate(addDays(t0,-65)) },
+    { id:'res5', tenantId:'t11', roomId:'r9', checkIn: fmtDate(addDays(t0, -15)), checkOut: fmtDate(addDays(t0, 45)), status:'checked_in', createdAt: fmtDate(addDays(t0,-20)) },
+
+    // 미래 예약 (오늘 이후) - 재배치 가능, 다양한 기간
+    { id:'res6', tenantId:'t5', roomId:'r2', checkIn: fmtDate(addDays(t0, 3)), checkOut: fmtDate(addDays(t0, 63)), status:'reserved', createdAt: fmtDate(addDays(t0,-5)) },
+    { id:'res7', tenantId:'t6', roomId:'r4', checkIn: fmtDate(addDays(t0, 8)), checkOut: fmtDate(addDays(t0, 38)), status:'reserved', createdAt: fmtDate(addDays(t0,-3)) },
+    { id:'res8', tenantId:'t7', roomId:'r6', checkIn: fmtDate(addDays(t0, 10)), checkOut: fmtDate(addDays(t0, 100)), status:'reserved', createdAt: fmtDate(addDays(t0,-2)) },
+    { id:'res9', tenantId:'t8', roomId:'r8', checkIn: fmtDate(addDays(t0, 7)), checkOut: fmtDate(addDays(t0, 67)), status:'reserved', createdAt: fmtDate(addDays(t0,-1)) },
+    { id:'res10', tenantId:'t9', roomId:'r10', checkIn: fmtDate(addDays(t0, 2)), checkOut: fmtDate(addDays(t0, 62)), status:'reserved', createdAt: fmtDate(addDays(t0,-4)) },
+
+    // 중기 예약
+    { id:'res11', tenantId:'t10', roomId:'r4', checkIn: fmtDate(addDays(t0, 42)), checkOut: fmtDate(addDays(t0, 75)), status:'reserved', createdAt: fmtDate(t0) },
+    { id:'res12', tenantId:'t12', roomId:'r2', checkIn: fmtDate(addDays(t0, 66)), checkOut: fmtDate(addDays(t0, 96)), status:'reserved', createdAt: fmtDate(t0) },
+    { id:'res13', tenantId:'t1', roomId:'r1', checkIn: fmtDate(addDays(t0, 18)), checkOut: fmtDate(addDays(t0, 78)), status:'reserved', createdAt: fmtDate(addDays(t0,-2)) },
+  ];
+
+  return {
+    rooms, tenants, reservations,
+    history: [],
+    view: { startOffset: -7, daysVisible: 90 }
+  };
+}
+
+let state = loadState();
+
+// ---------- TAB NAVIGATION ----------
+let currentTab = 'timeline';
+
+function tenantColorClass(tenantId) {
+  const idx = state.tenants.findIndex(t => t.id === tenantId);
+  return `tenant-${idx % 10}`;
+}
+
+function getTenant(id) { return state.tenants.find(t => t.id === id); }
+function getRoom(id) { return state.rooms.find(r => r.id === id); }
+
+function isLocked(res) {
+  const t0 = today();
+  return res.status === 'checked_in' && parseDate(res.checkIn) < t0;
+}
+
+// ---------- RENDER HEADER & NAV ----------
+function renderHeader() {
+  const t0 = today();
+  const activeCount = state.reservations.filter(r => {
+    const ci = parseDate(r.checkIn), co = parseDate(r.checkOut);
+    return r.status !== 'cancelled' && r.status !== 'checked_out' && ci <= t0 && t0 < co;
+  }).length;
+
+  // 향후 30일 공실률
+  const totalSlots = state.rooms.length * 30;
+  let occupied = 0;
+  for (let d = 0; d < 30; d++) {
+    const day = addDays(t0, d);
+    for (const room of state.rooms) {
+      const hasRes = state.reservations.some(r => {
+        if (r.status === 'cancelled') return false;
+        const ci = parseDate(r.checkIn), co = parseDate(r.checkOut);
+        return r.roomId === room.id && ci <= day && day < co;
+      });
+      if (hasRes) occupied++;
+    }
+  }
+  const occupancyRate = Math.round(occupied / totalSlots * 100);
+
+  return `
+  <div class="sticky top-0 z-30 bg-[var(--paper)] border-b border-[var(--line)]">
+    <div class="px-4 pt-3 pb-2 flex items-baseline justify-between">
+      <div>
+        <div class="text-[10px] mono tracking-[0.2em] text-[var(--muted)]">GOSIWON / FLOW</div>
+        <div class="text-xl font-extrabold tracking-tight">방 배정 관리</div>
+      </div>
+      <div class="text-right">
+        <div class="text-[10px] mono text-[var(--muted)]">TODAY</div>
+        <div class="text-sm font-bold mono">${fmtDate(t0).slice(5)}</div>
+      </div>
+    </div>
+
+    <div class="px-4 pb-3 flex gap-2">
+      <div class="flex-1 bg-[var(--accent-soft)] rounded-xl px-3 py-2">
+        <div class="text-[9px] mono text-[var(--accent)] tracking-wider">입실중</div>
+        <div class="text-lg font-bold">${activeCount}<span class="text-xs text-[var(--muted)] font-normal">/${state.rooms.length}</span></div>
+      </div>
+      <div class="flex-1 bg-white border border-[var(--line)] rounded-xl px-3 py-2">
+        <div class="text-[9px] mono text-[var(--muted)] tracking-wider">30일 점유율</div>
+        <div class="text-lg font-bold">${occupancyRate}<span class="text-xs text-[var(--muted)] font-normal">%</span></div>
+      </div>
+      <div class="flex-1 bg-white border border-[var(--line)] rounded-xl px-3 py-2">
+        <div class="text-[9px] mono text-[var(--muted)] tracking-wider">예약</div>
+        <div class="text-lg font-bold">${state.reservations.filter(r=>r.status==='reserved').length}</div>
+      </div>
+    </div>
+
+    <div class="flex border-t border-[var(--line)]">
+      ${['timeline','reservations','tenants','settings'].map(tab => {
+        const labels = { timeline:'타임라인', reservations:'예약', tenants:'입실자', settings:'설정' };
+        return `<button onclick="switchTab('${tab}')" class="flex-1 relative py-3 text-xs ${currentTab===tab?'tab-active':'text-[var(--muted)]'}">${labels[tab]}</button>`;
+      }).join('')}
+    </div>
+  </div>`;
+}
+
+// ---------- TIMELINE VIEW (세로 레이아웃) ----------
+function renderTimeline() {
+  const t0 = today();
+  const startDate = addDays(t0, state.view.startOffset);
+  const days = state.view.daysVisible;
+
+  // 화면 폭 기준으로 방 컬럼 너비 계산
+  // 모바일 max-width 430px - 좌측 날짜 라벨 44px = 386px 내외
+  // 방 10개로 나누면 약 38px씩, 좀 더 여유롭게 해서 가로 스크롤 살짝 발생하는 것도 OK
+  const dayHeight = days <= 30 ? 22 : (days <= 90 ? 10 : 6);
+  const roomColWidth = 40;
+  const leftColWidth = 44;
+  const totalHeight = dayHeight * days;
+  const compactMode = days > 30;
+
+  // 방 헤더 (맨 위 가로줄)
+  const roomHeaders = state.rooms.map(room => `
+    <div class="flex-shrink-0 border-r border-[var(--line)] text-center py-2 bg-[var(--paper)]"
+         style="width:${roomColWidth}px">
+      <div class="text-[8px] mono text-[var(--muted)]">${room.floor}F</div>
+      <div class="text-xs font-bold">${room.number}</div>
+    </div>
+  `).join('');
+
+  // 날짜 라벨 + 각 방의 세로 트랙
+  const rows = [];
+  for (let i = 0; i < days; i++) {
+    const d = addDays(startDate, i);
+    const isToday = d.getTime() === t0.getTime();
+    const isPast = d < t0;
+    const isWeekend = d.getDay() === 0 || d.getDay() === 6;
+    const isMonthStart = d.getDate() === 1;
+    const isSunday = d.getDay() === 0;
+
+    // 날짜 라벨 (좌측)
+    let dateLabel;
+    if (compactMode) {
+      // 간략 모드: 1일에 월 표시, 일요일에 날짜 표시
+      const showMonth = isMonthStart || i === 0;
+      const showWeek = isSunday && !showMonth;
+      dateLabel = `
+        <div class="flex-shrink-0 border-r ${showMonth?'border-t-2 border-t-[var(--ink)]':''} ${isToday?'bg-[var(--accent-soft)]':''} ${isWeekend && !isToday?'bg-[#F5F4ED]':''} border-[var(--line)] flex items-center justify-end pr-1.5 relative"
+             style="width:${leftColWidth}px; height:${dayHeight}px;">
+          ${showMonth ? `<div class="absolute left-1 top-0 text-[10px] mono font-extrabold text-[var(--ink)] leading-tight" style="transform:translateY(1px)">${d.getMonth()+1}월</div>` : ''}
+          ${showWeek ? `<div class="text-[9px] mono text-[var(--muted)] leading-none">${d.getDate()}</div>` : ''}
+          ${isToday ? `<div class="absolute right-0.5 text-[10px] font-bold text-[var(--accent)]">◀</div>` : ''}
+        </div>
+      `;
+    } else {
+      dateLabel = `
+        <div class="flex-shrink-0 border-r border-[var(--line)] ${isToday?'bg-[var(--accent-soft)]':''} ${isWeekend && !isToday?'bg-[#F5F4ED]':''} flex items-center justify-between px-1.5"
+             style="width:${leftColWidth}px; height:${dayHeight}px;">
+          <span class="text-[9px] mono ${isToday?'text-[var(--accent)] font-bold':'text-[var(--muted)]'}">${fmtDay(d)}</span>
+          <span class="text-[11px] font-bold ${isToday?'text-[var(--accent)]':''}">${d.getDate()}</span>
+        </div>
+      `;
+    }
+
+    // 각 방의 해당 날짜 셀 (드롭 타겟)
+    const roomCells = state.rooms.map(room => `
+      <div class="flex-shrink-0 border-r drop-cell ${isPast?'cell-locked':''} ${isToday?'border-t-2 border-t-[var(--accent)]':'border-b'} ${isWeekend && !isToday?'bg-[#F9F8F2]':''} border-[var(--line)]"
+           data-room="${room.id}" data-date="${fmtDate(d)}"
+           style="width:${roomColWidth}px; height:${dayHeight}px"></div>
+    `).join('');
+
+    rows.push(`
+      <div class="flex" data-date-row="${fmtDate(d)}">
+        ${dateLabel}
+        ${roomCells}
+      </div>
+    `);
+  }
+
+  // 예약 블록 (절대 위치로 오버레이)
+  const blocks = state.reservations
+    .filter(r => r.status !== 'cancelled')
+    .map(res => {
+      const ci = parseDate(res.checkIn), co = parseDate(res.checkOut);
+      const startIdx = diffDays(ci, startDate);
+      const endIdx = diffDays(co, startDate);
+      if (endIdx <= 0 || startIdx >= days) return '';
+
+      const clampStart = Math.max(0, startIdx);
+      const clampEnd = Math.min(days, endIdx);
+      const roomIdx = state.rooms.findIndex(r => r.id === res.roomId);
+      if (roomIdx === -1) return '';
+
+      const top = clampStart * dayHeight;
+      const height = (clampEnd - clampStart) * dayHeight;
+      const left = leftColWidth + roomIdx * roomColWidth;
+      const tenant = getTenant(res.tenantId);
+      const locked = isLocked(res);
+      const colorClass = locked ? '' : tenantColorClass(res.tenantId);
+      const bgStyle = locked ? 'background: var(--locked); color: #666;' : '';
+
+      // 이름 표시 전략: 블록 세로 길이에 따라
+      // 짧은 블록(< 40px): 첫 글자만
+      // 중간 블록(40-120px): 이름 전체
+      // 긴 블록(> 120px): 이름 + 기간
+      const name = tenant ? tenant.name : '?';
+      let content;
+      if (height < 30) {
+        content = `<div class="text-[10px] font-bold leading-none">${name[0]}</div>`;
+      } else if (height < 80) {
+        content = `<div class="text-[10px] font-bold leading-tight text-center px-0.5 truncate w-full">${name}</div>`;
+      } else {
+        content = `
+          <div class="text-[10px] font-bold leading-tight text-center px-0.5 truncate w-full">${name}</div>
+          <div class="text-[8px] mono opacity-70 mt-0.5">${diffDays(co,ci)}일</div>
+        `;
+      }
+
+      return `
+        <div class="absolute rounded-md flex flex-col items-center justify-center ${colorClass} ${locked?'':'cursor-grab active:cursor-grabbing'} reservation-block overflow-hidden"
+             data-res="${res.id}"
+             style="left:${left+1}px; top:${top+1}px; width:${roomColWidth-2}px; height:${height-2}px; ${bgStyle} ${locked?'':'touch-action:none;'}">
+          ${locked && height >= 40 ? '<div class="text-[8px] absolute top-0.5 right-0.5 opacity-60">🔒</div>' : ''}
+          ${content}
+        </div>
+      `;
+    }).join('');
+
+  const shiftUnit = state.view.daysVisible >= 90 ? 30 : (state.view.daysVisible >= 60 ? 14 : 7);
+  const totalWidth = leftColWidth + state.rooms.length * roomColWidth;
+
+  return `
+    <div class="fade-in">
+      <div class="px-4 py-2 flex items-center justify-between text-xs">
+        <div class="flex gap-1">
+          <button onclick="shiftView(-${shiftUnit})" class="w-8 h-8 rounded-lg border border-[var(--line)] bg-white active:bg-[var(--line)]">↑</button>
+          <button onclick="resetView()" class="px-3 h-8 rounded-lg border border-[var(--line)] bg-white active:bg-[var(--line)] mono">오늘</button>
+          <button onclick="shiftView(${shiftUnit})" class="w-8 h-8 rounded-lg border border-[var(--line)] bg-white active:bg-[var(--line)]">↓</button>
+        </div>
+        <div class="flex gap-1">
+          <button onclick="setDaysVisible(30)" class="px-2 h-8 rounded-lg text-xs mono ${state.view.daysVisible===30?'bg-[var(--ink)] text-white':'border border-[var(--line)] bg-white'}">1M</button>
+          <button onclick="setDaysVisible(90)" class="px-2 h-8 rounded-lg text-xs mono ${state.view.daysVisible===90?'bg-[var(--ink)] text-white':'border border-[var(--line)] bg-white'}">3M</button>
+          <button onclick="setDaysVisible(180)" class="px-2 h-8 rounded-lg text-xs mono ${state.view.daysVisible===180?'bg-[var(--ink)] text-white':'border border-[var(--line)] bg-white'}">6M</button>
+        </div>
+      </div>
+
+      <div class="overflow-x-auto scroll-x" id="timeline-scroll">
+        <div style="width:${totalWidth}px; position: relative;" class="bg-[var(--paper)]">
+          <div class="flex sticky top-0 z-20 bg-[var(--paper)] border-b border-[var(--line)]">
+            <div class="flex-shrink-0 border-r border-[var(--line)]" style="width:${leftColWidth}px; height: 44px;"></div>
+            ${roomHeaders}
+          </div>
+          <div style="position: relative;">
+            ${rows.join('')}
+            ${blocks}
+          </div>
+        </div>
+      </div>
+
+      <div class="px-4 py-3 mt-2">
+        <button onclick="runOptimization()" class="w-full bg-[var(--ink)] text-white rounded-2xl py-3 font-bold text-sm flex items-center justify-center gap-2 active:scale-[0.98] transition-transform">
+          <span>⚡</span>
+          <span>최적 배치 제안 보기</span>
+        </button>
+        <div class="text-[10px] text-[var(--muted)] text-center mt-2 leading-relaxed">
+          🔒 회색 블록은 잠금 · 컬러 블록은 길게 눌러 드래그<br/>
+          블록을 탭하면 상세 정보가 열려요
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ---------- RESERVATIONS VIEW ----------
+function renderReservations() {
+  const t0 = today();
+  const sorted = [...state.reservations].sort((a,b) => parseDate(a.checkIn) - parseDate(b.checkIn));
+
+  const statusBadge = (r) => {
+    const ci = parseDate(r.checkIn), co = parseDate(r.checkOut);
+    if (r.status === 'cancelled') return '<span class="text-[9px] mono bg-gray-200 text-gray-600 px-2 py-0.5 rounded-full">취소</span>';
+    if (r.status === 'checked_out') return '<span class="text-[9px] mono bg-gray-200 text-gray-600 px-2 py-0.5 rounded-full">퇴실</span>';
+    if (ci <= t0 && t0 < co) return '<span class="text-[9px] mono bg-[var(--accent-soft)] text-[var(--accent)] px-2 py-0.5 rounded-full font-bold">입실중</span>';
+    if (ci > t0) return '<span class="text-[9px] mono bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">예정</span>';
+    return '';
+  };
+
+  return `
+    <div class="fade-in px-4 py-3">
+      <button onclick="openNewReservation()" class="w-full mb-3 border-2 border-dashed border-[var(--accent)] text-[var(--accent)] rounded-2xl py-3 font-semibold text-sm active:bg-[var(--accent-soft)]">
+        + 새 예약 추가
+      </button>
+      <div class="space-y-2">
+        ${sorted.map(r => {
+          const tenant = getTenant(r.tenantId);
+          const room = getRoom(r.roomId);
+          const ci = parseDate(r.checkIn), co = parseDate(r.checkOut);
+          const days = diffDays(co, ci);
+          return `
+            <div class="bg-white rounded-2xl p-3 border border-[var(--line)] flex items-center gap-3" onclick="viewReservation('${r.id}')">
+              <div class="w-10 h-10 rounded-full ${tenantColorClass(r.tenantId)} flex items-center justify-center text-sm font-bold">
+                ${tenant?tenant.name[0]:'?'}
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2">
+                  <div class="font-semibold text-sm">${tenant?tenant.name:'?'}</div>
+                  ${statusBadge(r)}
+                </div>
+                <div class="text-[11px] text-[var(--muted)] mono mt-0.5">
+                  ${room?room.number+'호':'?'} · ${fmtShort(ci)} → ${fmtShort(co)} · ${days}일
+                </div>
+              </div>
+              <div class="text-[var(--muted)]">›</div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
+}
+
+// ---------- TENANTS VIEW ----------
+function renderTenants() {
+  return `
+    <div class="fade-in px-4 py-3">
+      <div class="space-y-2">
+        ${state.tenants.map(t => {
+          const resCount = state.reservations.filter(r => r.tenantId === t.id).length;
+          return `
+            <div class="bg-white rounded-2xl p-3 border border-[var(--line)] flex items-center gap-3">
+              <div class="w-10 h-10 rounded-full ${tenantColorClass(t.id)} flex items-center justify-center text-sm font-bold">${t.name[0]}</div>
+              <div class="flex-1">
+                <div class="font-semibold text-sm">${t.name}</div>
+                <div class="text-[11px] text-[var(--muted)] mono">${t.phone}</div>
+              </div>
+              <div class="text-[10px] mono text-[var(--muted)]">${resCount}건</div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
+}
+
+// ---------- SETTINGS VIEW ----------
+function renderSettings() {
+  return `
+    <div class="fade-in px-4 py-3 space-y-3">
+      <div class="bg-white rounded-2xl border border-[var(--line)] overflow-hidden">
+        <div class="px-4 py-3 border-b border-[var(--line)]">
+          <div class="text-xs font-bold">데이터 관리</div>
+        </div>
+        <button onclick="exportData()" class="w-full text-left px-4 py-3 text-sm active:bg-[var(--line)] border-b border-[var(--line)] flex justify-between items-center">
+          <span>📤 전체 데이터 내보내기 (JSON)</span>
+          <span class="text-[var(--muted)]">›</span>
+        </button>
+        <button onclick="document.getElementById('import-file').click()" class="w-full text-left px-4 py-3 text-sm active:bg-[var(--line)] border-b border-[var(--line)] flex justify-between items-center">
+          <span>📥 데이터 가져오기</span>
+          <span class="text-[var(--muted)]">›</span>
+        </button>
+        <input type="file" id="import-file" accept=".json" style="display:none" onchange="importData(event)">
+        <button onclick="resetAllData()" class="w-full text-left px-4 py-3 text-sm text-[var(--coral)] active:bg-[var(--line)] flex justify-between items-center">
+          <span>🔄 초기 샘플 데이터로 리셋</span>
+          <span class="text-[var(--muted)]">›</span>
+        </button>
+      </div>
+
+      <div class="bg-white rounded-2xl border border-[var(--line)] p-4">
+        <div class="text-xs font-bold mb-2">최적화 가중치</div>
+        <div class="text-[11px] text-[var(--muted)] leading-relaxed mb-3">
+          1순위 공실률 최소화 · 2순위 방 이동 최소화<br/>
+          3순위 선호도 반영 · 4순위 미래 여유 확보
+        </div>
+        <div class="space-y-1 text-[11px] mono text-[var(--muted)]">
+          <div>occupancy × 1.0</div>
+          <div>continuity × 0.6</div>
+          <div>preference × 0.3</div>
+          <div>future × 0.2</div>
+        </div>
+      </div>
+
+      <div class="text-center text-[10px] text-[var(--muted)] mono py-4">
+        GosiwonFlow v0.1 prototype<br/>
+        데이터는 이 브라우저에만 저장됩니다
+      </div>
+    </div>
+  `;
+}
+
+// ---------- MAIN RENDER ----------
+function render() {
+  const app = document.getElementById('app');
+  let content = '';
+  switch(currentTab) {
+    case 'timeline': content = renderTimeline(); break;
+    case 'reservations': content = renderReservations(); break;
+    case 'tenants': content = renderTenants(); break;
+    case 'settings': content = renderSettings(); break;
+  }
+  app.innerHTML = renderHeader() + content;
+
+  if (currentTab === 'timeline') {
+    attachDragHandlers();
+    // 오늘 날짜가 화면 상단 근처에 오도록 세로 스크롤
+    setTimeout(() => {
+      const todayRow = document.querySelector(`[data-date-row="${fmtDate(today())}"]`);
+      if (todayRow) {
+        const rect = todayRow.getBoundingClientRect();
+        const absTop = rect.top + window.pageYOffset;
+        // 헤더(탭+통계 카드 등) 높이를 고려해서 여유있게 스크롤
+        window.scrollTo({ top: absTop - 200, behavior: 'instant' });
+      }
+    }, 50);
+  }
+}
+
+function switchTab(tab) {
+  currentTab = tab;
+  render();
+}
+
+function shiftView(n) {
+  state.view.startOffset += n;
+  saveState();
+  render();
+}
+
+function resetView() {
+  state.view.startOffset = -7;
+  saveState();
+  render();
+}
+
+function setDaysVisible(n) {
+  // 뷰 기간이 바뀔 때 startOffset도 적절히 조정
+  if (n >= 90) state.view.startOffset = -7;
+  else if (n >= 60) state.view.startOffset = -5;
+  else state.view.startOffset = -3;
+  state.view.daysVisible = n;
+  saveState();
+  render();
+}
+
+// ---------- DRAG AND DROP ----------
+let dragState = null;
+
+function attachDragHandlers() {
+  const blocks = document.querySelectorAll('.reservation-block');
+  blocks.forEach(block => {
+    const resId = block.dataset.res;
+    const res = state.reservations.find(r => r.id === resId);
+    if (!res || isLocked(res)) return;
+
+    // Long-press detection
+    let pressTimer = null;
+    let startX = 0, startY = 0;
+    let dragging = false;
+
+    const startDrag = (clientX, clientY) => {
+      dragging = true;
+      block.classList.add('drag-ghost');
+      dragState = {
+        resId,
+        offsetX: clientX - block.getBoundingClientRect().left,
+        offsetY: clientY - block.getBoundingClientRect().top,
+        startClientX: clientX,
+        startClientY: clientY
+      };
+
+      // Create drag ghost
+      const ghost = block.cloneNode(true);
+      ghost.id = 'drag-ghost';
+      ghost.style.position = 'fixed';
+      ghost.style.pointerEvents = 'none';
+      ghost.style.zIndex = '9999';
+      ghost.style.opacity = '0.9';
+      ghost.style.transform = 'scale(1.03)';
+      ghost.style.boxShadow = '0 12px 32px rgba(0,0,0,0.35)';
+      ghost.style.left = (clientX - dragState.offsetX) + 'px';
+      ghost.style.top = (clientY - dragState.offsetY) + 'px';
+      ghost.classList.remove('drag-ghost');
+      document.body.appendChild(ghost);
+    };
+
+    const moveDrag = (clientX, clientY) => {
+      if (!dragging) return;
+      const ghost = document.getElementById('drag-ghost');
+      if (ghost) {
+        ghost.style.left = (clientX - dragState.offsetX) + 'px';
+        ghost.style.top = (clientY - dragState.offsetY) + 'px';
+      }
+
+      // Clear previous drop highlights
+      document.querySelectorAll('.drop-valid, .drop-invalid').forEach(el => {
+        el.classList.remove('drop-valid','drop-invalid');
+      });
+
+      // Find target cell
+      const target = getCellUnderPoint(clientX, clientY);
+      if (target) {
+        const canDrop = canDropOnCell(resId, target.roomId, target.date);
+        target.el.classList.add(canDrop ? 'drop-valid' : 'drop-invalid');
+      }
+    };
+
+    const endDrag = (clientX, clientY) => {
+      if (!dragging) { dragging = false; return; }
+      dragging = false;
+      block.classList.remove('drag-ghost');
+      document.getElementById('drag-ghost')?.remove();
+      document.querySelectorAll('.drop-valid, .drop-invalid').forEach(el => {
+        el.classList.remove('drop-valid','drop-invalid');
+      });
+
+      const target = getCellUnderPoint(clientX, clientY);
+      if (target && canDropOnCell(resId, target.roomId, target.date)) {
+        applyMove(resId, target.roomId, target.date);
+      }
+      dragState = null;
+    };
+
+    // Touch events
+    block.addEventListener('touchstart', (e) => {
+      const touch = e.touches[0];
+      startX = touch.clientX;
+      startY = touch.clientY;
+      pressTimer = setTimeout(() => {
+        // haptic feedback (if supported)
+        if (navigator.vibrate) navigator.vibrate(20);
+        startDrag(startX, startY);
+      }, 250);
+    }, { passive: true });
+
+    block.addEventListener('touchmove', (e) => {
+      const touch = e.touches[0];
+      if (!dragging && pressTimer) {
+        const dx = Math.abs(touch.clientX - startX);
+        const dy = Math.abs(touch.clientY - startY);
+        if (dx > 10 || dy > 10) {
+          clearTimeout(pressTimer);
+          pressTimer = null;
+        }
+      }
+      if (dragging) {
+        e.preventDefault();
+        moveDrag(touch.clientX, touch.clientY);
+      }
+    }, { passive: false });
+
+    block.addEventListener('touchend', (e) => {
+      if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+      if (dragging) {
+        const touch = e.changedTouches[0];
+        endDrag(touch.clientX, touch.clientY);
+      } else {
+        // Treat as tap
+        viewReservation(resId);
+      }
+    });
+
+    // Mouse events (desktop preview)
+    block.addEventListener('mousedown', (e) => {
+      startX = e.clientX;
+      startY = e.clientY;
+      startDrag(e.clientX, e.clientY);
+      const onMove = (ev) => moveDrag(ev.clientX, ev.clientY);
+      const onUp = (ev) => {
+        endDrag(ev.clientX, ev.clientY);
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  });
+}
+
+function getCellUnderPoint(x, y) {
+  const el = document.elementFromPoint(x, y);
+  if (!el) return null;
+  const cell = el.closest('.drop-cell');
+  if (!cell) return null;
+  return { el: cell, roomId: cell.dataset.room, date: cell.dataset.date };
+}
+
+function canDropOnCell(resId, targetRoomId, targetDate) {
+  const res = state.reservations.find(r => r.id === resId);
+  if (!res) return false;
+  if (isLocked(res)) return false;
+
+  const t0 = today();
+  const target = parseDate(targetDate);
+  if (target < t0) return false;
+
+  const duration = diffDays(parseDate(res.checkOut), parseDate(res.checkIn));
+  const newCheckIn = target;
+  const newCheckOut = addDays(newCheckIn, duration);
+
+  // Check for conflicts with other reservations in target room
+  for (const other of state.reservations) {
+    if (other.id === resId) continue;
+    if (other.status === 'cancelled') continue;
+    if (other.roomId !== targetRoomId) continue;
+    const oCi = parseDate(other.checkIn);
+    const oCo = parseDate(other.checkOut);
+    if (overlap(newCheckIn, newCheckOut, oCi, oCo)) return false;
+  }
+  return true;
+}
+
+function applyMove(resId, newRoomId, newCheckInDate) {
+  const res = state.reservations.find(r => r.id === resId);
+  if (!res) return;
+
+  const duration = diffDays(parseDate(res.checkOut), parseDate(res.checkIn));
+  const newCheckIn = parseDate(newCheckInDate);
+  const newCheckOut = addDays(newCheckIn, duration);
+
+  res.roomId = newRoomId;
+  res.checkIn = fmtDate(newCheckIn);
+  res.checkOut = fmtDate(newCheckOut);
+
+  state.history.push({
+    id: `h${Date.now()}`,
+    resId, action: 'manual_move',
+    newRoom: newRoomId, newDate: newCheckInDate,
+    at: new Date().toISOString()
+  });
+
+  saveState();
+  render();
+  toast('✓ 배정을 변경했어요');
+}
+
+// ---------- OPTIMIZATION ENGINE ----------
+function runOptimization() {
+  const t0 = today();
+
+  // Snapshot future reservations (unlocked)
+  const futureRes = state.reservations
+    .filter(r => !isLocked(r) && r.status !== 'cancelled' && r.status !== 'checked_out')
+    .map(r => ({...r}));
+
+  // Locked reservations remain as fixed obstacles
+  const lockedRes = state.reservations.filter(r => isLocked(r));
+
+  // Sort by check-in date (greedy scheduling)
+  futureRes.sort((a,b) => parseDate(a.checkIn) - parseDate(b.checkIn));
+
+  // Try assigning each to the room that minimizes gap with previous occupant
+  const roomSchedules = {};
+  state.rooms.forEach(r => { roomSchedules[r.id] = []; });
+  lockedRes.forEach(r => {
+    roomSchedules[r.roomId].push({
+      start: parseDate(r.checkIn),
+      end: parseDate(r.checkOut),
+      resId: r.id, locked: true
+    });
+  });
+
+  const suggestions = [];
+
+  for (const res of futureRes) {
+    const ci = parseDate(res.checkIn);
+    const co = parseDate(res.checkOut);
+
+    let bestRoom = null;
+    let bestScore = -Infinity;
+
+    for (const room of state.rooms) {
+      const schedule = roomSchedules[room.id];
+      // Check conflict
+      const hasConflict = schedule.some(s => overlap(ci, co, s.start, s.end));
+      if (hasConflict) continue;
+
+      // Calculate score (공실률 최소화 우선)
+      let gapBefore = Infinity;
+      let gapAfter = Infinity;
+      for (const s of schedule) {
+        if (s.end <= ci) {
+          const g = diffDays(ci, s.end);
+          if (g < gapBefore) gapBefore = g;
+        }
+        if (s.start >= co) {
+          const g = diffDays(s.start, co);
+          if (g < gapAfter) gapAfter = g;
+        }
+      }
+
+      // Prefer smaller gaps (tighter packing)
+      const occupancyScore = (gapBefore === Infinity ? 5 : Math.max(0, 15 - gapBefore))
+                           + (gapAfter === Infinity ? 5 : Math.max(0, 15 - gapAfter));
+
+      // Continuity: same room as existing reservations by same tenant (weight 0.6)
+      const sameRoomHistory = state.reservations.filter(
+        r => r.tenantId === res.tenantId && r.roomId === room.id && r.id !== res.id
+      ).length;
+      const continuityScore = sameRoomHistory * 10;
+
+      // Preference placeholder (weight 0.3) - prefer lower floors for now
+      const preferenceScore = (3 - room.floor) * 2;
+
+      // Future capacity (weight 0.2) - prefer rooms with less upcoming bookings
+      const futureCapacityScore = 10 - schedule.length;
+
+      const totalScore = 1.0 * occupancyScore
+                       + 0.6 * continuityScore
+                       + 0.3 * preferenceScore
+                       + 0.2 * futureCapacityScore;
+
+      if (totalScore > bestScore) {
+        bestScore = totalScore;
+        bestRoom = room;
+      }
+    }
+
+    if (bestRoom && bestRoom.id !== res.roomId) {
+      suggestions.push({
+        resId: res.id,
+        currentRoom: res.roomId,
+        suggestedRoom: bestRoom.id,
+        tenant: getTenant(res.tenantId),
+        checkIn: res.checkIn,
+        checkOut: res.checkOut
+      });
+    }
+
+    // Commit to schedule regardless (the engine assumes suggestions are accepted)
+    if (bestRoom) {
+      roomSchedules[bestRoom.id].push({
+        start: ci, end: co, resId: res.id, locked: false
+      });
+    } else {
+      // No room available — keep original
+      roomSchedules[res.roomId].push({
+        start: ci, end: co, resId: res.id, locked: false
+      });
+    }
+  }
+
+  showSuggestionsModal(suggestions);
+}
+
+function showSuggestionsModal(suggestions) {
+  const backdrop = document.createElement('div');
+  backdrop.className = 'fixed inset-0 bg-black/40 z-40 flex items-end';
+  backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
+
+  // Calculate current vs proposed occupancy for the summary
+  const currentIdle = calcIdleDays();
+  const proposedIdle = calcIdleDaysWithSuggestions(suggestions);
+  const saved = currentIdle - proposedIdle;
+
+  backdrop.innerHTML = `
+    <div class="slide-up bg-[var(--paper)] w-full max-w-[430px] mx-auto rounded-t-3xl max-h-[85vh] overflow-y-auto">
+      <div class="sticky top-0 bg-[var(--paper)] px-5 pt-4 pb-3 border-b border-[var(--line)]">
+        <div class="w-10 h-1 bg-[var(--line)] rounded-full mx-auto mb-3"></div>
+        <div class="flex items-baseline justify-between">
+          <div class="text-lg font-extrabold">최적 배치 제안</div>
+          <button onclick="this.closest('.fixed').remove()" class="text-[var(--muted)] text-sm">닫기</button>
+        </div>
+      </div>
+
+      <div class="px-5 py-4">
+        ${suggestions.length === 0 ? `
+          <div class="bg-[var(--accent-soft)] rounded-2xl p-5 text-center">
+            <div class="text-3xl mb-2">✓</div>
+            <div class="font-bold text-[var(--accent)] mb-1">이미 최적 상태예요</div>
+            <div class="text-xs text-[var(--muted)]">현재 배치가 공실률 관점에서 최적입니다</div>
+          </div>
+        ` : `
+          <div class="bg-white rounded-2xl p-4 mb-4 border border-[var(--line)]">
+            <div class="flex items-baseline gap-2 mb-1">
+              <div class="text-2xl font-extrabold text-[var(--accent)]">${saved >= 0 ? '-' : '+'}${Math.abs(saved)}일</div>
+              <div class="text-xs text-[var(--muted)]">공실 ${saved >= 0 ? '감소' : '증가'}</div>
+            </div>
+            <div class="text-[11px] text-[var(--muted)] mono">
+              현재 ${currentIdle}일 → 제안 ${proposedIdle}일 · ${suggestions.length}건 변경
+            </div>
+          </div>
+
+          <div class="space-y-2 mb-4">
+            ${suggestions.map((s,i) => {
+              const from = getRoom(s.currentRoom);
+              const to = getRoom(s.suggestedRoom);
+              return `
+                <div class="bg-white rounded-xl p-3 border border-[var(--line)] flex items-center gap-3">
+                  <div class="w-8 h-8 rounded-full ${tenantColorClass(s.tenant.id)} flex items-center justify-center text-xs font-bold">
+                    ${s.tenant.name[0]}
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="text-sm font-semibold">${s.tenant.name}</div>
+                    <div class="text-[10px] mono text-[var(--muted)]">${s.checkIn.slice(5)} → ${s.checkOut.slice(5)}</div>
+                  </div>
+                  <div class="flex items-center gap-1.5 text-xs">
+                    <span class="bg-gray-100 px-2 py-1 rounded-md mono text-[11px]">${from.number}</span>
+                    <span class="text-[var(--accent)]">→</span>
+                    <span class="bg-[var(--accent-soft)] text-[var(--accent)] px-2 py-1 rounded-md mono font-bold text-[11px]">${to.number}</span>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+
+          <button onclick="applySuggestions(${JSON.stringify(suggestions).replace(/"/g,'&quot;')})" class="w-full bg-[var(--accent)] text-white rounded-2xl py-3.5 font-bold text-sm mb-2">
+            ${suggestions.length}건 모두 적용
+          </button>
+          <button onclick="this.closest('.fixed').remove()" class="w-full bg-white border border-[var(--line)] rounded-2xl py-3 text-sm">
+            취소
+          </button>
+        `}
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+}
+
+function calcIdleDays() {
+  const t0 = today();
+  const horizon = 60; // 60 day window
+  let idle = 0;
+  for (const room of state.rooms) {
+    for (let d = 0; d < horizon; d++) {
+      const day = addDays(t0, d);
+      const occupied = state.reservations.some(r => {
+        if (r.status === 'cancelled') return false;
+        const ci = parseDate(r.checkIn), co = parseDate(r.checkOut);
+        return r.roomId === room.id && ci <= day && day < co;
+      });
+      if (!occupied) idle++;
+    }
+  }
+  return idle;
+}
+
+function calcIdleDaysWithSuggestions(suggestions) {
+  // Apply suggestions temporarily
+  const sugMap = {};
+  suggestions.forEach(s => { sugMap[s.resId] = s.suggestedRoom; });
+
+  const t0 = today();
+  const horizon = 60;
+  let idle = 0;
+  for (const room of state.rooms) {
+    for (let d = 0; d < horizon; d++) {
+      const day = addDays(t0, d);
+      const occupied = state.reservations.some(r => {
+        if (r.status === 'cancelled') return false;
+        const targetRoom = sugMap[r.id] || r.roomId;
+        const ci = parseDate(r.checkIn), co = parseDate(r.checkOut);
+        return targetRoom === room.id && ci <= day && day < co;
+      });
+      if (!occupied) idle++;
+    }
+  }
+  return idle;
+}
+
+function applySuggestions(suggestions) {
+  suggestions.forEach(s => {
+    const res = state.reservations.find(r => r.id === s.resId);
+    if (res && !isLocked(res)) {
+      res.roomId = s.suggestedRoom;
+      state.history.push({
+        id: `h${Date.now()}-${s.resId}`,
+        resId: s.resId, action: 'optimization_applied',
+        newRoom: s.suggestedRoom, at: new Date().toISOString()
+      });
+    }
+  });
+  saveState();
+  document.querySelector('.fixed.z-40')?.remove();
+  render();
+  toast(`✓ ${suggestions.length}건을 재배치했어요`);
+}
+
+// ---------- SIMPLE DETAIL VIEW ----------
+function viewReservation(resId) {
+  const res = state.reservations.find(r => r.id === resId);
+  if (!res) return;
+  const tenant = getTenant(res.tenantId);
+  const room = getRoom(res.roomId);
+  const locked = isLocked(res);
+  const days = diffDays(parseDate(res.checkOut), parseDate(res.checkIn));
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'fixed inset-0 bg-black/40 z-40 flex items-end';
+  backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
+  backdrop.innerHTML = `
+    <div class="slide-up bg-[var(--paper)] w-full max-w-[430px] mx-auto rounded-t-3xl p-5">
+      <div class="w-10 h-1 bg-[var(--line)] rounded-full mx-auto mb-4"></div>
+      <div class="flex items-center gap-3 mb-4">
+        <div class="w-12 h-12 rounded-full ${tenantColorClass(res.tenantId)} flex items-center justify-center text-lg font-bold">
+          ${tenant.name[0]}
+        </div>
+        <div class="flex-1">
+          <div class="text-lg font-extrabold">${tenant.name}</div>
+          <div class="text-xs mono text-[var(--muted)]">${tenant.phone}</div>
+        </div>
+        ${locked ? '<span class="text-[10px] mono bg-gray-200 text-gray-600 px-2 py-1 rounded-full">🔒 입실중</span>' : ''}
+      </div>
+
+      <div class="space-y-2 mb-4">
+        <div class="flex justify-between text-sm py-2 border-b border-[var(--line)]">
+          <span class="text-[var(--muted)]">방</span>
+          <span class="font-semibold">${room.number}호 · ${room.floor}F</span>
+        </div>
+        <div class="flex justify-between text-sm py-2 border-b border-[var(--line)]">
+          <span class="text-[var(--muted)]">입실</span>
+          <span class="font-semibold mono">${res.checkIn}</span>
+        </div>
+        <div class="flex justify-between text-sm py-2 border-b border-[var(--line)]">
+          <span class="text-[var(--muted)]">퇴실 예정</span>
+          <span class="font-semibold mono">${res.checkOut}</span>
+        </div>
+        <div class="flex justify-between text-sm py-2">
+          <span class="text-[var(--muted)]">거주 기간</span>
+          <span class="font-semibold">${days}일</span>
+        </div>
+      </div>
+
+      ${locked ? `
+        <button onclick="earlyCheckout('${resId}')" class="w-full bg-[var(--coral)] text-white rounded-2xl py-3 font-bold text-sm mb-2">
+          조기 퇴실 처리
+        </button>
+      ` : `
+        <button onclick="deleteReservation('${resId}')" class="w-full bg-white border border-[var(--coral)] text-[var(--coral)] rounded-2xl py-3 font-bold text-sm mb-2">
+          예약 취소
+        </button>
+      `}
+      <button onclick="this.closest('.fixed').remove()" class="w-full bg-white border border-[var(--line)] rounded-2xl py-3 text-sm">
+        닫기
+      </button>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+}
+
+function earlyCheckout(resId) {
+  const res = state.reservations.find(r => r.id === resId);
+  if (!res) return;
+  const t0 = today();
+  res.actualCheckOut = fmtDate(t0);
+  res.checkOut = fmtDate(t0);
+  res.status = 'checked_out';
+  saveState();
+  document.querySelector('.fixed.z-40')?.remove();
+  render();
+  toast('조기 퇴실 처리했어요');
+}
+
+function deleteReservation(resId) {
+  if (!confirm('이 예약을 취소할까요?')) return;
+  const res = state.reservations.find(r => r.id === resId);
+  if (res) res.status = 'cancelled';
+  saveState();
+  document.querySelector('.fixed.z-40')?.remove();
+  render();
+  toast('예약을 취소했어요');
+}
+
+function openNewReservation() {
+  const t0 = today();
+  const backdrop = document.createElement('div');
+  backdrop.className = 'fixed inset-0 bg-black/40 z-40 flex items-end';
+  backdrop.onclick = (e) => { if (e.target === backdrop) backdrop.remove(); };
+  backdrop.innerHTML = `
+    <div class="slide-up bg-[var(--paper)] w-full max-w-[430px] mx-auto rounded-t-3xl p-5">
+      <div class="w-10 h-1 bg-[var(--line)] rounded-full mx-auto mb-4"></div>
+      <div class="text-lg font-extrabold mb-4">새 예약</div>
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs text-[var(--muted)] block mb-1">입실자 이름</label>
+          <input id="new-name" type="text" class="w-full bg-white border border-[var(--line)] rounded-xl px-3 py-2.5 text-sm" placeholder="홍길동">
+        </div>
+        <div>
+          <label class="text-xs text-[var(--muted)] block mb-1">연락처</label>
+          <input id="new-phone" type="tel" class="w-full bg-white border border-[var(--line)] rounded-xl px-3 py-2.5 text-sm" placeholder="010-1234-5678">
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="text-xs text-[var(--muted)] block mb-1">입실일</label>
+            <input id="new-ci" type="date" value="${fmtDate(addDays(t0, 1))}" class="w-full bg-white border border-[var(--line)] rounded-xl px-3 py-2.5 text-sm">
+          </div>
+          <div>
+            <label class="text-xs text-[var(--muted)] block mb-1">퇴실일</label>
+            <input id="new-co" type="date" value="${fmtDate(addDays(t0, 61))}" class="w-full bg-white border border-[var(--line)] rounded-xl px-3 py-2.5 text-sm">
+          </div>
+        </div>
+      </div>
+      <button onclick="submitNewReservation()" class="w-full bg-[var(--ink)] text-white rounded-2xl py-3 font-bold text-sm mt-4">
+        자동 배정 후 저장
+      </button>
+      <button onclick="this.closest('.fixed').remove()" class="w-full bg-white border border-[var(--line)] rounded-2xl py-3 text-sm mt-2">
+        취소
+      </button>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+}
+
+function submitNewReservation() {
+  const name = document.getElementById('new-name').value.trim();
+  const phone = document.getElementById('new-phone').value.trim();
+  const ci = document.getElementById('new-ci').value;
+  const co = document.getElementById('new-co').value;
+  if (!name || !ci || !co) { alert('이름과 날짜를 입력해주세요'); return; }
+  if (parseDate(ci) >= parseDate(co)) { alert('퇴실일은 입실일 이후여야 해요'); return; }
+
+  // Find best room
+  const ciDate = parseDate(ci), coDate = parseDate(co);
+  let bestRoom = null;
+  let bestGap = Infinity;
+  for (const room of state.rooms) {
+    const hasConflict = state.reservations.some(r => {
+      if (r.status === 'cancelled') return false;
+      if (r.roomId !== room.id) return false;
+      return overlap(ciDate, coDate, parseDate(r.checkIn), parseDate(r.checkOut));
+    });
+    if (hasConflict) continue;
+    // Prefer room with closest prior booking
+    let minGap = Infinity;
+    for (const r of state.reservations) {
+      if (r.roomId !== room.id || r.status === 'cancelled') continue;
+      const rCo = parseDate(r.checkOut);
+      if (rCo <= ciDate) {
+        const gap = diffDays(ciDate, rCo);
+        if (gap < minGap) minGap = gap;
+      }
+    }
+    if (minGap < bestGap) { bestGap = minGap; bestRoom = room; }
+  }
+
+  if (!bestRoom) { alert('해당 기간에 가능한 방이 없어요'); return; }
+
+  const tenantId = `t${Date.now()}`;
+  const resId = `res${Date.now()}`;
+  state.tenants.push({ id: tenantId, name, phone, notes: '' });
+  state.reservations.push({
+    id: resId, tenantId, roomId: bestRoom.id,
+    checkIn: ci, checkOut: co,
+    status: 'reserved',
+    createdAt: fmtDate(today())
+  });
+  saveState();
+  document.querySelector('.fixed.z-40')?.remove();
+  render();
+  toast(`✓ ${bestRoom.number}호에 배정했어요`);
+}
+
+// ---------- DATA IMPORT/EXPORT ----------
+function exportData() {
+  const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `gosiwon-${fmtDate(today())}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('✓ 내보내기 완료');
+}
+
+function importData(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (!data.rooms || !data.tenants || !data.reservations) throw new Error('형식 오류');
+      state = data;
+      saveState();
+      render();
+      toast('✓ 가져오기 완료');
+    } catch(err) {
+      alert('파일을 읽을 수 없어요: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+function resetAllData() {
+  if (!confirm('모든 데이터를 초기 샘플로 되돌릴까요?')) return;
+  localStorage.removeItem(STORAGE_KEY);
+  state = loadState();
+  render();
+  toast('✓ 초기화 완료');
+}
+
+// ---------- TOAST ----------
+function toast(msg) {
+  const existing = document.getElementById('toast');
+  if (existing) existing.remove();
+  const el = document.createElement('div');
+  el.id = 'toast';
+  el.className = 'fixed bottom-6 left-1/2 -translate-x-1/2 bg-[var(--ink)] text-white px-4 py-2.5 rounded-full text-xs font-semibold z-50 shadow-lg';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2000);
+}
+
+// ---------- INIT ----------
+render();
+</script>
+
+</body>
+</html>
